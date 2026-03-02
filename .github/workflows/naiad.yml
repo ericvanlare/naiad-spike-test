@@ -79,7 +79,7 @@ jobs:
           node-version: "24"
 
       - name: Install Naiad CLI
-        run: npm install -g ./naiad-cli-0.1.0.tgz
+        run: npm install -g naiad-cli
 
       - name: Construct prompt
         id: prompt
