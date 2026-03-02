@@ -1,0 +1,1 @@
+AC-D6 re-test: verifying PR link appears in result comment.
