@@ -1,73 +1,37 @@
-# Naiad Agent — GitHub Actions Workflow
+# Naiad Agent — GitHub Actions Workflow (App-dispatched)
 # Copy this file to .github/workflows/naiad.yml in your repository.
 #
-# Required setup:
-# 1. Create a Naiad API key at https://v2.naiadai.com/app/settings
-# 2. Add it as a repository secret named NAIAD_API_KEY
-# 3. (Optional) Set NAIAD_API_URL secret if not using https://v2.naiadai.com
+# Prerequisites:
+# 1. Install the Naiad GitHub App on this repository
+# 2. Add NAIAD_API_KEY as a repository secret
 #
-# Usage:
-# - Comment /naiad <instruction> on any issue to trigger the agent
-# - Or manually dispatch from the Actions tab with a custom prompt
+# The Naiad App handles triggering, reactions, and result comments.
+# This workflow just runs the agent.
 
 name: Naiad Agent
 
 on:
-  issue_comment:
-    types: [created]
   workflow_dispatch:
     inputs:
-      prompt:
-        description: "Instruction for the agent"
+      thread_id:
+        description: "Naiad thread ID"
         required: true
         type: string
 
 permissions:
   contents: write
   pull-requests: write
-  issues: write
 
-# Prevent parallel runs on the same issue. Do NOT cancel in-progress runs —
-# cancellation kills `if: always()` cleanup steps (result PATCH, comment posting),
-# which would leave threads stuck in RUNNING with no reconciliation worker to fix them.
-# Instead, queue new runs behind the current one.
 concurrency:
-  group: naiad-${{ github.repository }}-${{ github.event.issue.number || github.run_id }}
+  group: naiad-${{ inputs.thread_id }}
   cancel-in-progress: false
 
 jobs:
   agent:
-    # Security: Only run for trusted users (OWNER/MEMBER/COLLABORATOR).
-    # Prevents untrusted users (e.g., fork PR commenters) from triggering
-    # runs that have access to secrets. Also skip bot comments to prevent loops.
-    if: >
-      github.event_name == 'workflow_dispatch' ||
-      (github.event_name == 'issue_comment' &&
-       !github.event.issue.pull_request &&
-       startsWith(github.event.comment.body, '/naiad') &&
-       github.event.comment.user.type != 'Bot' &&
-       contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association))
     runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     steps:
-      - name: React to comment
-        if: github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions \
-            -X POST -f content='eyes' --silent || true
-
-      - name: Validate secrets
-        env:
-          NAIAD_API_KEY: ${{ secrets.NAIAD_API_KEY }}
-        run: |
-          if [ -z "$NAIAD_API_KEY" ]; then
-            echo "::error::NAIAD_API_KEY secret is not set. Add it in Settings → Secrets → Actions."
-            exit 1
-          fi
-
       - name: Checkout
         uses: actions/checkout@v4
         with:
@@ -81,90 +45,47 @@ jobs:
       - name: Install Naiad CLI
         run: npm install -g naiad-cli
 
-      - name: Construct prompt
-        id: prompt
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            let prompt, contextJson, replyTargetJson, issueNumber;
+      - name: Fetch thread prompt
+        id: thread
+        env:
+          NAIAD_API_KEY: ${{ secrets.NAIAD_API_KEY }}
+          NAIAD_API_URL: ${{ secrets.NAIAD_API_URL || 'https://v2.naiadai.com' }}
+        run: |
+          THREAD=$(curl -sf "${NAIAD_API_URL}/api/v1/threads/${{ inputs.thread_id }}" \
+            -H "Authorization: Bearer ${NAIAD_API_KEY}")
 
-            if (context.eventName === 'workflow_dispatch') {
-              prompt = context.payload.inputs.prompt;
-              contextJson = JSON.stringify({
-                repo: context.repo.owner + '/' + context.repo.repo,
-                ref: context.ref,
-                sha: context.sha
-              });
-              replyTargetJson = '';
-              issueNumber = '';
-            } else {
-              const comment = context.payload.comment.body;
-              const instruction = comment.replace(/^\/naiad\s*/, '').trim();
-              const issue = context.payload.issue;
-              issueNumber = String(issue.number);
+          echo "$THREAD" | jq -r '.prompt' > /tmp/naiad-prompt.txt
+          echo "$THREAD" | jq -r '.context // "{}" ' > /tmp/naiad-context.json
+          echo "$THREAD" | jq -r '.reply_target // ""' > /tmp/naiad-reply-target.json
+          echo "$THREAD" | jq -r '.source // "github"' > /tmp/naiad-source.txt
+          echo "$THREAD" | jq -r '.trigger // "issue_comment"' > /tmp/naiad-trigger.txt
 
-              const isPR = !!issue.pull_request;
-              const issueType = isPR ? 'Pull Request' : 'Issue';
+          CONTEXT=$(cat /tmp/naiad-context.json)
+          REPLY_TARGET=$(cat /tmp/naiad-reply-target.json)
+          SOURCE=$(cat /tmp/naiad-source.txt)
+          TRIGGER=$(cat /tmp/naiad-trigger.txt)
 
-              const MAX_BODY = 20000;
-              let issueBody = issue.body || '(no description)';
-              if (issueBody.length > MAX_BODY) {
-                issueBody = issueBody.slice(0, MAX_BODY) + '\n\n... (truncated)';
-              }
-
-              prompt = [
-                `You are working on the repository ${context.repo.owner}/${context.repo.repo}.`,
-                ``,
-                `## Task`,
-                instruction || 'Review and address this issue.',
-                ``,
-                `## Context`,
-                `This was requested on GitHub ${issueType} #${issue.number}: ${issue.title}`,
-                ``,
-                issueBody,
-              ].join('\n');
-
-              contextJson = JSON.stringify({
-                repo: context.repo.owner + '/' + context.repo.repo,
-                issue_number: issue.number,
-                issue_url: issue.html_url,
-                is_pr: isPR,
-                comment_id: context.payload.comment.id,
-                comment_url: context.payload.comment.html_url,
-                ref: context.ref,
-                sha: context.sha
-              });
-
-              replyTargetJson = JSON.stringify({
-                type: 'github_comment',
-                repo: context.repo.owner + '/' + context.repo.repo,
-                issue_number: issue.number
-              });
-            }
-
-            fs.writeFileSync('/tmp/naiad-prompt.txt', prompt);
-
-            core.setOutput('context', contextJson);
-            core.setOutput('reply_target', replyTargetJson);
-            core.setOutput('issue_number', issueNumber);
+          echo "context=$CONTEXT" >> "$GITHUB_OUTPUT"
+          echo "reply_target=$REPLY_TARGET" >> "$GITHUB_OUTPUT"
+          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
+          echo "trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
 
       - name: Run agent
-        id: agent
         env:
           NAIAD_API_KEY: ${{ secrets.NAIAD_API_KEY }}
           NAIAD_API_URL: ${{ secrets.NAIAD_API_URL || 'https://v2.naiadai.com' }}
         run: |
           ARGS=(
             --prompt-file /tmp/naiad-prompt.txt
-            --source github
-            --trigger "${{ github.event_name }}"
-            --context '${{ steps.prompt.outputs.context }}'
+            --source "${{ steps.thread.outputs.source }}"
+            --trigger "${{ steps.thread.outputs.trigger }}"
+            --context '${{ steps.thread.outputs.context }}'
             --output /tmp/naiad-result.json
+            --thread "${{ inputs.thread_id }}"
           )
 
-          REPLY_TARGET='${{ steps.prompt.outputs.reply_target }}'
-          if [ -n "$REPLY_TARGET" ]; then
+          REPLY_TARGET='${{ steps.thread.outputs.reply_target }}'
+          if [ -n "$REPLY_TARGET" ] && [ "$REPLY_TARGET" != "null" ]; then
             ARGS+=(--reply-target "$REPLY_TARGET")
           fi
 
@@ -180,21 +101,15 @@ jobs:
           fi
 
           echo "has_changes=true" >> "$GITHUB_OUTPUT"
-
-          THREAD_ID=""
-          if [ -f /tmp/naiad-result.json ]; then
-            THREAD_ID=$(jq -r '.thread_id // empty' /tmp/naiad-result.json)
-          fi
-          BRANCH="naiad/${THREAD_ID:-$(date +%s)}"
+          THREAD_ID="${{ inputs.thread_id }}"
+          BRANCH="naiad/${THREAD_ID}"
 
           git config user.name "Naiad Agent"
           git config user.email "agent@naiadai.com"
-
           git checkout -b "$BRANCH"
           git add -A
-          git commit -m "naiad: agent changes${THREAD_ID:+ for thread $THREAD_ID}"
+          git commit -m "naiad: agent changes for thread $THREAD_ID"
           git push origin "$BRANCH"
-
           echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
 
       - name: Open PR
@@ -203,44 +118,25 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          THREAD_URL=""
-          if [ -f /tmp/naiad-result.json ]; then
-            THREAD_URL=$(jq -r '.thread_url // empty' /tmp/naiad-result.json)
-          fi
-
-          ISSUE_NUMBER="${{ steps.prompt.outputs.issue_number }}"
-          TITLE="naiad: agent changes"
-          if [ -n "$ISSUE_NUMBER" ]; then
-            TITLE="naiad: changes for #${ISSUE_NUMBER}"
-          fi
-
-          BODY="Changes made by the Naiad agent."
-          if [ -n "$THREAD_URL" ]; then
-            BODY="${BODY}\n\n[View agent thread →](${THREAD_URL})"
-          fi
-          if [ -n "$ISSUE_NUMBER" ]; then
-            BODY="${BODY}\n\nCloses #${ISSUE_NUMBER}"
-          fi
-
+          THREAD_ID="${{ inputs.thread_id }}"
           BRANCH="${{ steps.push.outputs.branch }}"
+          NAIAD_API_URL="${{ secrets.NAIAD_API_URL || 'https://v2.naiadai.com' }}"
+          THREAD_URL="${NAIAD_API_URL}/app/threads/${THREAD_ID}"
+
           EXISTING_PR=$(gh pr view --head "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
-
           if [ -n "$EXISTING_PR" ]; then
-            PR_URL="$EXISTING_PR"
-          else
-            PR_URL=$(gh pr create \
-              --title "$TITLE" \
-              --body "$(echo -e "$BODY")" \
-              --head "$BRANCH" \
-              --base "${{ github.event.repository.default_branch }}" \
-              2>/dev/null) || true
-
-            # Fallback: query the PR if create didn't return a URL
-            if [ -z "$PR_URL" ]; then
-              PR_URL=$(gh pr view "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
-            fi
+            echo "pr_url=$EXISTING_PR" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
 
+          gh pr create \
+            --title "naiad: agent changes" \
+            --body "Changes by Naiad agent.\n\n[View thread →](${THREAD_URL})" \
+            --head "$BRANCH" \
+            --base "${{ github.event.repository.default_branch }}" \
+            2>/dev/null || true
+
+          PR_URL=$(gh pr view --head "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Update thread with result
@@ -249,19 +145,14 @@ jobs:
           NAIAD_API_KEY: ${{ secrets.NAIAD_API_KEY }}
           NAIAD_API_URL: ${{ secrets.NAIAD_API_URL || 'https://v2.naiadai.com' }}
         run: |
-          if [ ! -f /tmp/naiad-result.json ]; then
-            exit 0
-          fi
+          THREAD_ID="${{ inputs.thread_id }}"
+          if [ -z "$THREAD_ID" ]; then exit 0; fi
 
-          THREAD_ID=$(jq -r '.thread_id // empty' /tmp/naiad-result.json)
-          if [ -z "$THREAD_ID" ]; then
-            exit 0
+          RAW_STATUS="FAILED"
+          if [ -f /tmp/naiad-result.json ]; then
+            RAW_STATUS=$(jq -r '.status // "FAILED"' /tmp/naiad-result.json)
           fi
-
-          RAW_STATUS=$(jq -r '.status // "FAILED"' /tmp/naiad-result.json)
-          if [ "$RAW_STATUS" != "COMPLETED" ]; then
-            RAW_STATUS="FAILED"
-          fi
+          if [ "$RAW_STATUS" != "COMPLETED" ]; then RAW_STATUS="FAILED"; fi
 
           RESULT=$(jq -n \
             --arg status "$RAW_STATUS" \
@@ -269,40 +160,7 @@ jobs:
             --arg branch "${{ steps.push.outputs.branch }}" \
             '{status: $status, pr_url: (if $pr_url != "" then $pr_url else null end), branch: (if $branch != "" then $branch else null end)}')
 
-          curl -s -X PATCH "${NAIAD_API_URL}/api/v1/threads/${THREAD_ID}" \
+          curl -sf -X PATCH "${NAIAD_API_URL}/api/v1/threads/${THREAD_ID}" \
             -H "Authorization: Bearer ${NAIAD_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "{\"status\": \"${RAW_STATUS}\", \"result\": ${RESULT}}" || true
-
-      - name: Post results comment
-        if: always() && github.event_name == 'issue_comment'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          ISSUE_NUMBER="${{ steps.prompt.outputs.issue_number }}"
-          if [ -z "$ISSUE_NUMBER" ]; then
-            exit 0
-          fi
-
-          STATUS="❌ **failed**"
-          THREAD_URL=""
-          if [ -f /tmp/naiad-result.json ]; then
-            AGENT_STATUS=$(jq -r '.status // "FAILED"' /tmp/naiad-result.json)
-            THREAD_URL=$(jq -r '.thread_url // empty' /tmp/naiad-result.json)
-            if [ "$AGENT_STATUS" = "COMPLETED" ]; then
-              STATUS="✅ **completed**"
-            fi
-          fi
-
-          COMMENT="🤖 Naiad agent run ${STATUS}"
-
-          PR_URL="${{ steps.pr.outputs.pr_url }}"
-          if [ -n "$PR_URL" ]; then
-            COMMENT="${COMMENT} — [PR opened](${PR_URL})"
-          fi
-
-          if [ -n "$THREAD_URL" ]; then
-            COMMENT="${COMMENT}\n\n[View full thread →](${THREAD_URL})"
-          fi
-
-          gh issue comment "$ISSUE_NUMBER" --body "$(echo -e "$COMMENT")"
