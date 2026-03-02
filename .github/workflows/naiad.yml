@@ -124,14 +124,16 @@ jobs:
             exit 0
           fi
 
-          gh pr create \
+          PR_URL=$(gh pr create \
             --title "naiad: agent changes" \
             --body "Changes by Naiad agent.\n\n[View thread →](${THREAD_URL})" \
             --head "$BRANCH" \
             --base "${{ github.event.repository.default_branch }}" \
-            2>/dev/null || true
+            2>/dev/null) || true
 
-          PR_URL=$(gh pr view --head "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
+          if [ -z "$PR_URL" ]; then
+            PR_URL=$(gh pr view --head "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
+          fi
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
 
       - name: Update thread with result
