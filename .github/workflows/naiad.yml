@@ -55,20 +55,15 @@ jobs:
             -H "Authorization: Bearer ${NAIAD_API_KEY}")
 
           echo "$THREAD" | jq -r '.prompt' > /tmp/naiad-prompt.txt
-          echo "$THREAD" | jq -r '.context // "{}" ' > /tmp/naiad-context.json
-          echo "$THREAD" | jq -r '.reply_target // ""' > /tmp/naiad-reply-target.json
+          echo "$THREAD" | jq -c '.context // {}' > /tmp/naiad-context.json
+          echo "$THREAD" | jq -c '.reply_target // empty' > /tmp/naiad-reply-target.json
           echo "$THREAD" | jq -r '.source // "github"' > /tmp/naiad-source.txt
           echo "$THREAD" | jq -r '.trigger // "issue_comment"' > /tmp/naiad-trigger.txt
 
-          CONTEXT=$(cat /tmp/naiad-context.json)
-          REPLY_TARGET=$(cat /tmp/naiad-reply-target.json)
-          SOURCE=$(cat /tmp/naiad-source.txt)
-          TRIGGER=$(cat /tmp/naiad-trigger.txt)
-
-          echo "context=$CONTEXT" >> "$GITHUB_OUTPUT"
-          echo "reply_target=$REPLY_TARGET" >> "$GITHUB_OUTPUT"
-          echo "source=$SOURCE" >> "$GITHUB_OUTPUT"
-          echo "trigger=$TRIGGER" >> "$GITHUB_OUTPUT"
+          echo "context=$(cat /tmp/naiad-context.json)" >> "$GITHUB_OUTPUT"
+          echo "reply_target=$(cat /tmp/naiad-reply-target.json)" >> "$GITHUB_OUTPUT"
+          echo "source=$(cat /tmp/naiad-source.txt)" >> "$GITHUB_OUTPUT"
+          echo "trigger=$(cat /tmp/naiad-trigger.txt)" >> "$GITHUB_OUTPUT"
 
       - name: Run agent
         env:
