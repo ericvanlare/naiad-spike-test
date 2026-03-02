@@ -228,14 +228,17 @@ jobs:
           if [ -n "$EXISTING_PR" ]; then
             PR_URL="$EXISTING_PR"
           else
-            gh pr create \
+            PR_URL=$(gh pr create \
               --title "$TITLE" \
               --body "$(echo -e "$BODY")" \
               --head "$BRANCH" \
               --base "${{ github.event.repository.default_branch }}" \
-              2>/dev/null || true
+              2>/dev/null) || true
 
-            PR_URL=$(gh pr view --head "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
+            # Fallback: query the PR if create didn't return a URL
+            if [ -z "$PR_URL" ]; then
+              PR_URL=$(gh pr view "$BRANCH" --json url --jq '.url' 2>/dev/null || true)
+            fi
           fi
 
           echo "pr_url=$PR_URL" >> "$GITHUB_OUTPUT"
