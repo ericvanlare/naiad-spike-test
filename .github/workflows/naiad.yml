@@ -166,6 +166,7 @@ jobs:
         id: agent
         env:
           NAIAD_API_URL: ${{ secrets.NAIAD_API_URL || 'https://v2.naiadai.com' }}
+          NAIAD_ATTEMPT: ${{ inputs.attempt || '1' }}
         run: |
           THREAD_ID="${{ inputs.thread_id }}"
           ATTEMPT="${{ inputs.attempt || '1' }}"
