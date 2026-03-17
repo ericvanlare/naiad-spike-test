@@ -1,0 +1,1 @@
+AC-D6 final verification with naiad-cli 0.2.1
